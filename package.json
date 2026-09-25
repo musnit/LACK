@@ -1,0 +1,7 @@
+{
+  "name": "latticeanimals-handoff",
+  "private": true,
+  "type": "commonjs",
+  "engines": { "node": ">=24" },
+  "scripts": { "test": "node --test tests/*.test.js" }
+}
