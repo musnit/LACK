@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const { runGame } = require('../gym/host');
 const { PRESETS } = require('../gym/presets');
 const Player = require('../game/Player');
-const Walker = require('../player');
+const Walker = require('../strategies/walker');
 const RandomWalker = require('../strategies/random');
 
 const small = { ...PRESETS.arena, width: 16, height: 16, unitsPerPlayer: 8, maxRounds: 3, turnsPerRound: 20 };
