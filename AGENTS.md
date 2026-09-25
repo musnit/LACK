@@ -26,6 +26,8 @@ swapping). `player.js` only selects one via the `STRATEGY` environment variable:
 dropping a new file in `strategies/`; don't put strategy logic in `player.js`.
 Keep strategies simple and readable, with a short header comment saying what
 the strategy does, so the user can follow the code and watch it play.
+The exception is `strategies/evolve/`, a folder strategy maintained live by its
+own T3 thread; read its README before touching it.
 
 **Gym** (`gym/`, arriving with PR #1; if the folder is missing, that PR has not
 merged yet): `node gym/run.js strategies/huddle.js strategies/rally.js` plays
