@@ -5,7 +5,7 @@
 //          maintainer thread rewrites. It runs sandboxed (core/sandbox.js):
 //          no file writes, no network, no child processes, no speech.
 //   core/  this static scaffolding, which the thread may not edit. It reloads
-//          live/ for each new game, owns all speech, and relays players'
+//          live/ as soon as it changes, owns all speech, and relays players'
 //          suggestions to the thread (core/speech.js, core/relay.js).
 // Every turn a random unit advertises: say "evolve: <idea>". The most recent
 // suggestion heard goes to the thread every 15 seconds. Relaying only happens
