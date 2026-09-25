@@ -1,7 +1,7 @@
 # Evolve: a self-updating strategy
 
 A dedicated T3 thread (the *maintainer*) rewrites this strategy while it plays.
-Other players can steer it: each round one of our units says
+Other players can steer it: every turn a random one of our units says
 
 > I'm a self-evolving bot. Say "evolve: <idea>" and my AI maintainer may rewrite my strategy with it.
 
@@ -13,7 +13,7 @@ for the maintainer.
                      │ turns, messages
 ┌────────────────────▼──────────── bot process (has the token) ───────┐
 │ index.js + core/  (static; the maintainer may not edit it)          │
-│   speech.js  owns all speech: advert per round, picks suggestions,  │
+│   speech.js  owns all speech: advert every turn, picks suggestions, │
 │              drops the live strategy's own `say` commands           │
 │   relay.js   one-slot buffer → every 15 s → t3-threads send ────────┼──► Evolve maintainer
 │   sandbox.js runs live/ in a locked-down child process, hot reload  │     thread (T3)
@@ -46,7 +46,7 @@ Player as `'../../../game/Player'` and shared helpers as `'../../lib'`. Two
 differences from running it directly:
 
 - Its `say` commands are dropped (only moves and blushes for our own units pass),
-  and one unit per round may be borrowed for the advert.
+  and each turn one unit (a random idle one if any) says the advert instead of acting.
 - It runs sandboxed (below), and a new version takes effect at the next game.
 
 ## Relay

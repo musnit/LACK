@@ -7,7 +7,7 @@
 //   core/  this static scaffolding, which the thread may not edit. It reloads
 //          live/ for each new game, owns all speech, and relays players'
 //          suggestions to the thread (core/speech.js, core/relay.js).
-// Each round one unit advertises: say "evolve: <idea>". The most recent
+// Every turn a random unit advertises: say "evolve: <idea>". The most recent
 // suggestion heard goes to the thread every 15 seconds. Relaying only happens
 // under the live client (client.js or gym/record.js) once core/setup.js has
 // configured a thread; in the gym evolve plays the same but never relays.
@@ -35,25 +35,16 @@ const sandbox = new Sandbox({
 
 class Evolve extends Player {
     #live = sandbox.open();
-    #turnInRound = 0;
-    #advertised = false;
 
     round(width, height, targetShape) {
         super.round(width, height, targetShape);
         this.#live.round(width, height, targetShape);
-        this.#turnInRound = 0;
-        this.#advertised = false;
     }
 
     async turn(state, remainingMs) {
         relay.hear(speech.suggestions(state.messages));
-        let commands = speech.legalCommands(await this.#live.turn(state, remainingMs), state.ownUnits);
-        if (!this.#advertised) {
-            const withAdvert = speech.advertise(commands, state.ownUnits, this.#turnInRound);
-            if (withAdvert) [commands, this.#advertised] = [withAdvert, true];
-        }
-        this.#turnInRound++;
-        return commands;
+        const commands = speech.legalCommands(await this.#live.turn(state, remainingMs), state.ownUnits);
+        return speech.advertise(commands, state.ownUnits);
     }
 
     roundEnd(outcomes) { this.#live.roundEnd(outcomes); }
