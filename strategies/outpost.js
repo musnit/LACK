@@ -22,6 +22,8 @@
 //     break it with a last-turn step (the attack below, used against us).
 //   - A move the server keeps refusing (another unit claims the same cell every
 //     turn) is dropped for a few random turns, so two stubborn units can't deadlock.
+//   - Camouflage: idle units copy the colour of nearby foreign units, so bots that
+//     tell allies apart by colour treat them as their own.
 //   - Endgame attacks: in the last turns idle units wait next to cells that would
 //     complete a copy with other teams' units. On the final turn, when nobody can
 //     react, units that would score nothing step in ("snipe"), and a lone unit of
@@ -33,6 +35,8 @@ const TURNS_PER_ROUND = 64; // server default; the Player API doesn't tell us
 const STILL = 3;            // a foreign unit parked this many turns counts as an anchor
 const STAGE = 6;            // idle units start lining up last-turn snipes this many turns before the end
 const REACH = 16;           // how far we look for foreign units to build around
+const MIMIC_RADIUS = 3;     // idle units copy the colour of foreign units this close
+const MIMIC_EVERY = 8;      // ... at most once every this many turns
 const GUARD = 16;           // copies dodge last-turn attacks this many turns before the end
 const DIRS = Object.entries(Player.DELTAS);
 const EMPTY = 0, OWN = 1, FOREIGN = 2;
@@ -47,6 +51,7 @@ class Outpost extends Player {
         this.stuck = new Map();             // handle -> turns spent unable to move toward its job
         this.sent = new Map();              // handle -> { from, to } of last turn's move command
         this.refused = new Map();           // handle -> { to, count, until } for moves the server refused
+        this.recoloured = new Map();        // handle -> turn it last changed colour
     }
 
     async turn(state) {
@@ -79,7 +84,7 @@ class Outpost extends Player {
             const at = units.get(c.handle), [dx, dy] = Player.DELTAS[c.params[0]];
             return [c.handle, { from: at, to: at + dy * W + dx }];
         }));
-        return commands;
+        return [...commands, ...this.#mimic(state, commands)];
     }
 
     // A unit still where it was after we moved it was blocked: usually by another unit
@@ -102,6 +107,33 @@ class Outpost extends Player {
     // strand its members all round: disband it so they can plan something else.
     #dropUnfinishable() {
         this.sites = this.sites.filter(site => site.cells.every(c => site.members.has(c) || site.anchors.has(c)));
+    }
+
+    // ---------- camouflage ----------
+
+    // Some bots tell friend from foe by colour. A unit with nothing else to do this
+    // turn takes on the most common colour among nearby foreign units (closer ones
+    // count more), so such bots treat it as one of theirs: they build around it and
+    // step aside for it. Changing colour costs the unit's action, so only idle units
+    // do it, each at most once every MIMIC_EVERY turns.
+    #mimic(state, commands) {
+        const W = this.width, busy = new Set(commands.map(c => c.handle)), out = [];
+        const coloured = state.units.filter(u => u.blush && !this.ownAt.has(u.y * W + u.x));
+        if (!coloured.length) return out;
+        for (const unit of state.ownUnits) {
+            if (busy.has(unit.handle) || this.turnIndex - (this.recoloured.get(unit.handle) ?? -MIMIC_EVERY) < MIMIC_EVERY) continue;
+            const votes = new Map();
+            for (const other of coloured) {
+                const d = Math.max(Math.abs(other.x - unit.x), Math.abs(other.y - unit.y));
+                if (d <= MIMIC_RADIUS) votes.set(other.blush, (votes.get(other.blush) ?? 0) + 1 / d);
+            }
+            if (!votes.size) continue;
+            const [colour] = [...votes].reduce((a, b) => (b[1] > a[1] ? b : a));
+            if (colour === unit.blush) continue;
+            out.push(Player.commands.blush(unit.handle, colour));
+            this.recoloured.set(unit.handle, this.turnIndex);
+        }
+        return out;
     }
 
     // ---------- endgame attacks ----------
