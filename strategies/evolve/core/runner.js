@@ -36,6 +36,7 @@ process.on('message', async message => {
         if (type === 'round') player?.round(message.width, message.height, message.targetShape);
         if (type === 'roundEnd') player?.roundEnd(message.outcomes);
         if (type === 'finish') { games.delete(game); player?.finish(message.result); }
+        if (type === 'release') games.delete(game);   // the game moved to newer code
     } catch (error) { fail({ type: 'error' }, error); }
 });
 
