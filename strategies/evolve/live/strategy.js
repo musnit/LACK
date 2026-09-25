@@ -25,23 +25,6 @@
 //     teammate, and every few turns the whole team replans if that finds more
 //     jobs. An anchor inside another team's copy is fair game when the matcher
 //     would give it to us (it scans top-left first).
-//   - Every candidate spot is checked with the real matcher, so a copy is
-//     never placed where a neighbour would make it match wrongly.
-// Outpost: build shape copies ("outposts") right where our units already are,
-// then keep them alive while the board around them changes.
-//
-//   - Local first: the tightest clusters of our units each claim a nearby spot
-//     that is clear of other teams (crowded spots get blocked or stolen).
-//   - Real routing: every unit follows a shortest path around other units, and
-//     teammates pass the baton when one of ours sits in the way.
-//   - Repair every turn: a copy whose spot gets occupied shifts to a nearby
-//     free spot; units that lost their job fill open slots or plan new copies.
-//   - No idle leftovers: ownership doesn't matter for matching, so a foreign
-//     unit that has parked can fill one of our cells ("anchor"). Leftover units
-//     build copies around anchors, existing copies shift onto one to free a
-//     teammate, and every few turns the whole team replans if that finds more
-//     jobs. An anchor inside another team's copy is fair game when the matcher
-//     would give it to us (it scans top-left first).
 //   - Every copy is checked with the real matcher, when planned and again every
 //     turn, and moved if a neighbour would make it match wrongly. Anchors that
 //     sit in another team's half-built copy scanned before ours are avoided.
