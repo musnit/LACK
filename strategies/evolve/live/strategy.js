@@ -27,10 +27,34 @@
 //     would give it to us (it scans top-left first).
 //   - Every candidate spot is checked with the real matcher, so a copy is
 //     never placed where a neighbour would make it match wrongly.
+// Outpost: build shape copies ("outposts") right where our units already are,
+// then keep them alive while the board around them changes.
+//
+//   - Local first: the tightest clusters of our units each claim a nearby spot
+//     that is clear of other teams (crowded spots get blocked or stolen).
+//   - Real routing: every unit follows a shortest path around other units, and
+//     teammates pass the baton when one of ours sits in the way.
+//   - Repair every turn: a copy whose spot gets occupied shifts to a nearby
+//     free spot; units that lost their job fill open slots or plan new copies.
+//   - No idle leftovers: ownership doesn't matter for matching, so a foreign
+//     unit that has parked can fill one of our cells ("anchor"). Leftover units
+//     build copies around anchors, existing copies shift onto one to free a
+//     teammate, and every few turns the whole team replans if that finds more
+//     jobs. An anchor inside another team's copy is fair game when the matcher
+//     would give it to us (it scans top-left first).
+//   - Every copy is checked with the real matcher, when planned and again every
+//     turn, and moved if a neighbour would make it match wrongly. Anchors that
+//     sit in another team's half-built copy scanned before ours are avoided.
+//   - Endgame attacks: in the last turns idle units wait next to cells that would
+//     complete a copy with other teams' units. On the final turn, when nobody can
+//     react, units that would score nothing step in ("snipe"), and a lone unit of
+//     ours propping up someone else's copy steps out ("pull") when that hurts
+//     them more than it costs us (judged by the number of competitors).
 const Player = require('../../../game/Player');
 
 const TURNS_PER_ROUND = 64; // server default; the Player API doesn't tell us
 const STILL = 3;            // a foreign unit parked this many turns counts as an anchor
+const STAGE = 6;            // idle units start lining up last-turn snipes this many turns before the end
 const REACH = 16;           // how far we look for foreign units to build around
 const DIRS = Object.entries(Player.DELTAS);
 const EMPTY = 0, OWN = 1, FOREIGN = 2;
@@ -54,6 +78,8 @@ class Outpost extends Player {
         for (let i = 0; i < grid.length; i++) this.still[i] = grid[i] === FOREIGN && this.grid?.[i] === FOREIGN ? this.still[i] + 1 : 0;
         this.grid = grid;
         Object.assign(this, { units, ownAt, turnsLeft });
+        // Rough number of competitors, from the first board of the game (units only die later).
+        this.teams ??= Math.max(2, Math.round(state.units.length / Math.max(1, state.ownUnits.length)));
 
         this.#maintainSites();
         this.#fillOpenSlots(this.#free());
@@ -63,7 +89,87 @@ class Outpost extends Player {
         // Once we can tell which foreign units have parked, see whether a fresh plan
         // that builds around them would give our leftovers a job too.
         if (this.#free().length && this.turnIndex % STILL === 1 && turnsLeft > 32) this.#replan();
-        return this.#move(this.#free());
+        const idle = this.#free();
+        const snipes = turnsLeft > 1 && turnsLeft <= STAGE ? this.#snipeSpots(idle) : new Map();
+        const commands = this.#move(idle, snipes);
+        return turnsLeft === 1 ? this.#finalTouch(commands) : commands;
+    }
+
+    // ---------- endgame attacks ----------
+
+    // Score of a predicted final board around `cells`: our matched units, minus other
+    // teams' matched units weighted by how much hurting one rival helps us (1 in a
+    // duel, less in a crowd). Only the neighbourhood can change, so only it is matched.
+    #score(grid, cells) {
+        const { width: W, height: H } = this, shape = this.targetShape;
+        const xs = cells.map(c => c % W), ys = cells.map(c => Math.floor(c / W));
+        const reach = 2 * Math.max(shape.width, shape.height);
+        let own = 0, foreign = 0;
+        for (const match of matches(grid, W, H, shape, Math.min(...xs) - reach, Math.min(...ys) - reach, Math.max(...xs) + reach, Math.max(...ys) + reach)) {
+            for (const c of match) grid[c] === OWN ? own++ : foreign++;
+        }
+        return own - foreign / (this.teams - 1);
+    }
+
+    // Last turn: nobody can react any more. Let units that would score nothing (or that
+    // only prop up someone else's copy) step wherever the matcher pays us most:
+    // into a cell that completes a copy with other teams' units ("snipe"), or out
+    // of a foreign copy so it breaks ("pull").
+    #finalTouch(commands) {
+        const W = this.width, H = this.height;
+        const grid = this.grid.slice(), moves = new Map(commands.map(c => [c.handle, c]));
+        const land = new Map();
+        for (const [h, c] of moves) {
+            const [dx, dy] = Player.DELTAS[c.params[0]], at = this.units.get(h), to = at + dy * W + dx;
+            grid[at] = EMPTY; grid[to] = OWN; land.set(h, to);
+        }
+        const claimed = new Set(land.values());
+        const matchedWith = new Map();   // cell -> the match's cells
+        for (const cells of matches(grid, W, H, this.targetShape, 0, 0, W, H)) for (const c of cells) matchedWith.set(c, cells);
+        const candidates = [...this.units.keys()].filter(h => {
+            const cell = land.get(h) ?? this.units.get(h), match = matchedWith.get(cell);
+            return !match || match.filter(c => grid[c] === OWN).length === 1;
+        });
+        for (const h of candidates) {
+            const from = land.get(h) ?? this.units.get(h), at = this.units.get(h);
+            const area = [at, ...neighbours(at, W, H)];
+            let best = this.#score(grid, area), choice = null;
+            for (const to of area) {
+                if (to !== from && (grid[to] !== EMPTY || claimed.has(to))) continue;
+                grid[from] = EMPTY; grid[to] = OWN;
+                const score = this.#score(grid, area);
+                grid[to] = EMPTY; grid[from] = OWN;
+                if (score > best + 1e-9) { best = score; choice = to; }
+            }
+            if (choice === null) continue;
+            grid[from] = EMPTY; grid[choice] = OWN;
+            claimed.delete(from); claimed.add(choice);
+            moves.delete(h);
+            if (choice !== at) moves.set(h, Player.commands.move(h, directionTo(at, choice, W)));
+        }
+        return [...moves.values()];
+    }
+
+    // Near the end, idle units look for a nearby empty cell where standing would
+    // complete a copy with other units, and wait next to it for the last turn.
+    #snipeSpots(idle) {
+        const W = this.width, H = this.height, shape = this.targetShape, spots = new Map(), taken = new Set();
+        for (const h of idle) {
+            const at = this.units.get(h);
+            let best = null;
+            const [x, y] = xy(at, W);
+            for (let ny = y - this.turnsLeft; ny <= y + this.turnsLeft; ny++) for (let nx = x - this.turnsLeft; nx <= x + this.turnsLeft; nx++) {
+                if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+                const c = ny * W + nx, d = dist(at, c, W);
+                if (d === 0 || d > this.turnsLeft || this.grid[c] !== EMPTY || taken.has(c)) continue;
+                this.grid[at] = EMPTY; this.grid[c] = OWN;
+                const hit = matches(this.grid, W, H, shape, nx - shape.width, ny - shape.height, nx + 1, ny + 1).some(cells => cells.includes(c));
+                this.grid[c] = EMPTY; this.grid[at] = OWN;
+                if (hit && (!best || d < best.d)) best = { c, d };
+            }
+            if (best) { spots.set(h, best.c); taken.add(best.c); }
+        }
+        return spots;
     }
 
     #free() { return [...this.units.keys()].filter(h => !this.#siteOf(h)); }
@@ -85,13 +191,18 @@ class Outpost extends Player {
     #siteOf(handle) { return this.sites.find(site => [...site.members.values()].includes(handle)); }
 
     #maintainSites() {
-        for (const site of [...this.sites]) {
+        for (let site of [...this.sites]) {
             for (const [cell, handle] of site.members) if (!this.units.has(handle)) site.members.delete(cell);
             for (const cell of site.anchors) if (this.grid[cell] !== FOREIGN) site.anchors.delete(cell);
             // A foreign unit parked on one of our cells: move the copy to a clean spot nearby,
             // or failing that, accept the visitor as part of the copy and free our unit.
+            // Likewise move the copy if its neighbours changed so the matcher wouldn't give it to us.
             const parked = site.cells.filter(c => !site.anchors.has(c) && this.anchor(c));
-            if (parked.length && !this.#relocate(site)) for (const c of parked) { site.anchors.add(c); site.members.delete(c); }
+            if (parked.length || (this.turnsLeft > 2 && !this.#holds(site))) {
+                const moved = this.#relocate(site);
+                if (moved) site = moved;
+                else for (const c of parked) { site.anchors.add(c); site.members.delete(c); }
+            }
             // Give up on members that can no longer arrive in time.
             for (const [cell, handle] of site.members) if (dist(this.units.get(handle), cell, this.width) > this.turnsLeft) site.members.delete(cell);
             if (!site.members.size) this.sites.splice(this.sites.indexOf(site), 1);
@@ -109,7 +220,7 @@ class Outpost extends Player {
             if (option && option.anchors.size === 0 && (!best || option.cost < best.cost)) best = option;
         }
         if (best) this.sites[this.sites.indexOf(site)] = best.site;
-        return Boolean(best);
+        return best?.site ?? null;
     }
 
     // Open slots in existing copies go to the nearest free unit that can make it.
@@ -242,12 +353,8 @@ class Outpost extends Player {
         const site = { cells, members: new Map(), anchors };
         const members = this.#assign(handles, site);
         if (!members) return null;
-        // The real matcher must match every cell once the copy is complete.
-        const trial = this.grid.slice();
-        for (const [, h] of site.members) trial[this.units.get(h)] = EMPTY;
-        for (const c of cells) trial[c] = OWN;
-        const matched = new Set(matches(trial, W, H, shape, ox - shape.width, oy - shape.height, ox + shape.width + 1, oy + shape.height + 1).flat());
-        if (!cells.every(c => matched.has(c))) return null;
+        if (!this.#holds(site)) return null;
+        for (const a of anchors) if (this.#claimedEarlier(a, ox, oy)) return null;
         let total = 0, crowd = 0;
         const spread = this.#spread(site);
         for (const [c, h] of site.members) total += dist(this.units.get(h), c, W);
@@ -261,6 +368,35 @@ class Outpost extends Player {
             }
         }
         return { site, anchors, spread, cost: spread + total / cells.length + crowd * 2 };
+    }
+
+    // Would the real matcher match every cell of this copy once its members arrive?
+    #holds(site) {
+        const { width: W, height: H } = this, shape = this.targetShape;
+        const trial = this.grid.slice();
+        for (const [, h] of site.members) trial[this.units.get(h)] = EMPTY;
+        for (const c of site.cells) trial[c] = OWN;
+        const [x, y] = xy(Math.min(...site.cells), W);
+        const matched = new Set(matches(trial, W, H, shape, x - 2 * shape.width, y - shape.height, x + 2 * shape.width, y + shape.height).flat());
+        return site.cells.every(c => matched.has(c));
+    }
+
+    // Is this anchor probably part of another team's copy in progress, one the matcher
+    // scans before ours (origin ox, oy)? When they finish it, it takes the anchor from us.
+    #claimedEarlier(anchor, ox, oy) {
+        const { width: W } = this, shape = this.targetShape, k = shape.cells.length;
+        const [ax, ay] = xy(anchor, W);
+        for (const [cx, cy] of shape.cells) {
+            const tx = ax - cx, ty = ay - cy;
+            if (ty > oy || (ty === oy && tx >= ox) || tx < 0 || ty < 0) continue;
+            let others = 0;
+            for (const [dx, dy] of shape.cells) {
+                const c = (ty + dy) * W + tx + dx;
+                if (c !== anchor && tx + dx < W && this.grid[c] === FOREIGN) others++;
+            }
+            if (others >= Math.ceil((k - 1) / 2)) return true;
+        }
+        return false;
     }
 
     // Turns until the last member can arrive.
@@ -298,15 +434,17 @@ class Outpost extends Player {
 
     // ---------- move ----------
 
-    #move(idle) {
+    #move(idle, snipes = new Map()) {
         const W = this.width, H = this.height, grid = this.grid;
         const target = new Map();                // handle -> cell
         for (const site of this.sites) for (const [cell, h] of site.members) target.set(h, cell);
+        // Snipers wait next to their spot; the final turn decides whether to step in.
+        for (const [h, cell] of snipes) if (dist(this.units.get(h), cell, W) > 1) target.set(h, cell);
         const siteCells = new Set(this.sites.flatMap(site => site.cells));
         // Idle units step off and away from our copies so they can't confuse the matcher.
         for (const h of idle) {
             const at = this.units.get(h);
-            if (!nearAny(at, siteCells, W)) continue;
+            if (snipes.has(h) || !nearAny(at, siteCells, W)) continue;
             const spot = nearestWhere(at, W, H, i => grid[i] === EMPTY && !nearAny(i, siteCells, W));
             if (spot !== null) target.set(h, spot);
         }
@@ -355,13 +493,8 @@ class Outpost extends Player {
         for (const h of this.units.keys()) this.stuck.set(h, next.has(h) || !target.has(h) || this.units.get(h) === target.get(h) ? 0 : (this.stuck.get(h) ?? 0) + 1);
         function claim(h, i) { next.set(h, i); claimed.add(i); }
 
-        const commands = [];
-        for (const [h, i] of next) {
-            const at = this.units.get(h);
-            const [dir] = DIRS.find(([, [dx, dy]]) => at + dy * W + dx === i && Math.abs((at % W) - (i % W)) <= 1);
-            commands.push(Player.commands.move(h, dir));
-        }
-        return commands;
+        return [...next].filter(([h, i]) => !(snipes.get(h) === i && this.turnsLeft > 1))
+            .map(([h, i]) => Player.commands.move(h, directionTo(this.units.get(h), i, W)));
     }
 
     #swapJobs(a, b, cellA, cellB) {
@@ -372,6 +505,7 @@ class Outpost extends Player {
 
 // ---------- grid helpers (cells are indices y * width + x) ----------
 
+const directionTo = (from, to, W) => DIRS.find(([, [dx, dy]]) => from + dy * W + dx === to && Math.abs((from % W) - (to % W)) <= 1)[0];
 const xy = (i, W) => [i % W, Math.floor(i / W)];
 const dist = (a, b, W) => Math.abs((a % W) - (b % W)) + Math.abs(Math.floor(a / W) - Math.floor(b / W));
 
