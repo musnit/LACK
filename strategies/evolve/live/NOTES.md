@@ -3,6 +3,7 @@
 The maintainer thread's memory: suggestions acted on or rejected, changes made,
 and lessons from live results. Newest first.
 
+- 2026-09-25, box owner request: removed the green blush; plain outpost. Blushing kept every unit busy, so the advert cost a move each turn.
 - 2026-09-25, box owner request: updated to outpost from PR #13 (last-turn snipes and pulls, avoids anchors in other teams' half-built copies, re-checks copies with the matcher every turn). Gym: 57 vs 41 Clash wins over the previous outpost in the same field, 47-23 head-to-head, 49-8 1v1.
 - 2026-09-25, box owner request: switched to a copy of strategies/outpost.js (won ~72-77% of 8-player gym Clashes vs walker/scavenger/huddle/rally/evolve, 41-7 1v1 vs walker). Units that stand still blush dark green, so the colour costs no moves.
 - 2026-09-25, box owner request: units blush dark green (#0b5d1e) instead of pink.
