@@ -6,9 +6,7 @@
 // can read game/ and strategies/, but can't write files, use the network or start
 // processes, and its `say` commands are dropped (evolve's core owns speech).
 //
-// Current version: a copy of strategies/outpost.js (the best gym strategy so far),
-// with units that stand still this turn blushing dark green (#0b5d1e), so the
-// colour never costs a move.
+// Current version: a copy of strategies/outpost.js (PR #13), without colours.
 //
 // Outpost: build shape copies ("outposts") right where our units already are,
 // then keep them alive while the board around them changes.
@@ -547,17 +545,4 @@ function matches(grid, W, H, shape, x0, y0, x1, y1) {
     return found;
 }
 
-const GREEN = '#0b5d1e';
-
-class Evolve extends Outpost {
-    async turn(state) {
-        const commands = await super.turn(state);
-        const acting = new Set(commands.map(command => command.handle));
-        for (const unit of state.ownUnits) {
-            if (!acting.has(unit.handle) && unit.blush !== GREEN) commands.push(Player.commands.blush(unit.handle, GREEN));
-        }
-        return commands;
-    }
-}
-
-module.exports = Evolve;
+module.exports = Outpost;
