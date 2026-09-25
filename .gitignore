@@ -5,3 +5,5 @@ node_modules/
 output/
 gym/recordings/
 gym/runs/
+strategies/evolve/journal.jsonl
+strategies/evolve/*.sending
