@@ -38,12 +38,15 @@ const readBody = req => new Promise((resolve, reject) => {
 const readJson = (file, fallback) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } };
 
 // ---------- strategies ----------
+// Every strategies/*.js file that defines a Player subclass (lib.js only holds helpers).
 function listStrategies() {
-    const files = ['player.js', ...fs.readdirSync(path.join(ROOT, 'strategies')).filter(file => file.endsWith('.js')).map(file => `strategies/${file}`)];
-    return files.map(file => {
-        const source = fs.readFileSync(path.join(ROOT, file), 'utf8');
+    const live = liveSettings().strategy;
+    return fs.readdirSync(path.join(ROOT, 'strategies')).filter(file => file.endsWith('.js')).sort().flatMap(file => {
+        const source = fs.readFileSync(path.join(ROOT, 'strategies', file), 'utf8');
+        if (!/extends\s+Player\b/.test(source)) return [];
+        const name = file.replace(/\.js$/, '');
         const summary = source.split('\n').filter(line => line.startsWith('//')).slice(0, 3).map(line => line.replace(/^\/\/\s?/, '')).join(' ');
-        return { file, lines: source.split('\n').length, summary, live: file === 'player.js' };
+        return [{ file: `strategies/${file}`, name, lines: source.split('\n').length, summary, live: name === live }];
     });
 }
 const isStrategy = file => listStrategies().some(entry => entry.file === file);
@@ -129,8 +132,9 @@ function stopRun(id) {
 const runSummary = ({ replays, output, ...run }) => ({ ...run, replays });
 
 // ---------- live bot ----------
-const live = { child: null, startedAt: null, exitedAt: null, exitCode: null, log: [] };
-const liveSettings = () => ({ autostart: false, endpoint: 'wss://latticeanimals.com/ws', ...readJson(LIVE_FILE, {}) });
+const live = { child: null, strategy: null, startedAt: null, exitedAt: null, exitCode: null, log: [] };
+// `strategy` is passed to player.js as STRATEGY (player.js defaults to huddle).
+const liveSettings = () => ({ autostart: false, endpoint: 'wss://latticeanimals.com/ws', strategy: 'huddle', ...readJson(LIVE_FILE, {}) });
 const saveLiveSettings = settings => {
     fs.mkdirSync(SETTINGS_DIR, { recursive: true });
     fs.writeFileSync(LIVE_FILE, JSON.stringify(settings, null, 2));
@@ -145,12 +149,14 @@ function startLive() {
     let token;
     try { token = fs.readFileSync(TOKEN_FILE, 'utf8').trim(); } catch {}
     if (!token) throw new Error(`No token. Save your player token to ${TOKEN_FILE}.`);
-    const { endpoint } = liveSettings();
-    const child = spawn(process.execPath, [path.join(ROOT, 'gym', 'record.js'), token, endpoint], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+    const { endpoint, strategy } = liveSettings();
+    const child = spawn(process.execPath, [path.join(ROOT, 'gym', 'record.js'), token, endpoint],
+        { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, STRATEGY: strategy } });
+    live.strategy = strategy;
     live.child = child;
     live.startedAt = Date.now();
     live.exitCode = null;
-    logLive(`--- started live bot (pid ${child.pid}) using player.js ---`);
+    logLive(`--- started live bot (pid ${child.pid}) playing strategies/${strategy}.js ---`);
     child.stdout.on('data', logLive);
     child.stderr.on('data', logLive);
     child.on('exit', code => {
@@ -170,7 +176,8 @@ function stopLive({ remember = true } = {}) {
 const liveStatus = () => ({
     running: !!live.child, pid: live.child?.pid ?? null, startedAt: live.startedAt, exitedAt: live.exitedAt,
     exitCode: live.exitCode, hasToken: fs.existsSync(TOKEN_FILE), tokenFile: TOKEN_FILE,
-    endpoint: liveSettings().endpoint, log: live.log.slice(-200)
+    endpoint: liveSettings().endpoint, strategy: liveSettings().strategy, runningStrategy: live.child ? live.strategy : null,
+    log: live.log.slice(-200)
 });
 
 // ---------- recordings ----------
@@ -233,6 +240,13 @@ const routes = [
     ['GET', /^\/api\/live$/, () => liveStatus()],
     ['POST', /^\/api\/live\/start$/, () => { startLive(); return liveStatus(); }],
     ['POST', /^\/api\/live\/stop$/, async () => { await stopLive(); return liveStatus(); }],
+    ['POST', /^\/api\/live\/strategy$/, async req => {
+        const { strategy } = await readBody(req);
+        if (!listStrategies().some(entry => entry.name === strategy)) return [400, { error: 'Unknown strategy.' }];
+        saveLiveSettings({ ...liveSettings(), strategy });
+        if (live.child) { await stopLive({ remember: false }); startLive(); }
+        return liveStatus();
+    }],
     ['POST', /^\/api\/live\/restart$/, async () => { await stopLive(); startLive(); return liveStatus(); }],
     ['GET', /^\/api\/recordings$/, () => listRecordings()],
     ['GET', /^\/api\/recordings\/([\w-]+)$/, (req, url, [, id]) => {
@@ -271,7 +285,8 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
     console.log(`LACK dashboard on http://${HOST}:${PORT}`);
-    if (liveSettings().autostart) {
+    // LACK_AUTOSTART=0 keeps a test copy of the dashboard from taking over the account's live connection.
+    if (liveSettings().autostart && process.env.LACK_AUTOSTART !== '0') {
         try { startLive(); } catch (error) { logLive(error.message); }
     }
 });

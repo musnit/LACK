@@ -113,7 +113,7 @@ async function Overview() {
             h('div', { class: 'grid two' },
                 h('section', { class: 'card' },
                     h('h2', {}, 'Live bot ', live.running ? h('span', { class: 'badge live' }, 'running') : h('span', { class: 'badge warn' }, 'stopped')),
-                    h('p', { class: 'muted small' }, live.running ? `Up ${duration(Date.now() - live.startedAt)} · playing player.js` : 'Not connected to the server.'),
+                    h('p', { class: 'muted small' }, live.running ? `Up ${duration(Date.now() - live.startedAt)} · playing ${live.runningStrategy}` : 'Not connected to the server.'),
                     h('div', { class: 'stat-row' },
                         h('div', { class: 'stat' }, h('b', {}, overview.recordings.length), h('span', {}, 'games in progress')),
                         h('div', { class: 'stat' }, h('b', {}, `${wins}/${finished.length}`), h('span', {}, 'recorded games won'))),
@@ -281,12 +281,24 @@ async function GymRun(id) {
 async function Live() {
     const log = h('pre', { class: 'log mono', tabindex: 0, 'aria-label': 'Live bot log' });
     const status = h('div');
+    const strategies = await api('strategies');
+    // Built once so the 3-second refresh doesn't reset it while you're choosing.
+    const picker = h('select', { id: 'live-strategy' }, strategies.map(entry => h('option', { value: entry.name }, entry.name)));
+    const choose = h('form', { class: 'buttons', style: { alignItems: 'end', marginTop: '1rem' }, onsubmit: async event => {
+        event.preventDefault();
+        try { await api('live/strategy', { method: 'POST', body: { strategy: picker.value } }); toast(`Live bot will play ${picker.value}`); await refresh(); }
+        catch (error) { toast(error.message); }
+    } },
+        h('label', { class: 'field', style: { marginBottom: 0 } }, h('span', {}, 'Strategy to play live'), picker),
+        h('button', { type: 'submit' }, 'Use this strategy'));
+    let pickerSynced = false;
     const act = async action => {
         try { await api(`live/${action}`, { method: 'POST' }); toast(`Live bot: ${action}`); await refresh(); }
         catch (error) { toast(error.message); }
     };
     const refresh = async () => {
         const live = await api('live');
+        if (!pickerSynced) { picker.value = live.strategy; pickerSynced = true; }
         const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
         log.textContent = live.log.join('\n') || 'No output yet.';
         if (atBottom) log.scrollTop = log.scrollHeight;
@@ -294,8 +306,10 @@ async function Live() {
             h('p', {}, live.running ? h('span', { class: 'badge live' }, 'running') : h('span', { class: 'badge warn' }, 'stopped'), ' ',
                 h('span', { class: 'muted' }, live.running ? `pid ${live.pid}, up ${duration(Date.now() - live.startedAt)}` :
                     live.exitedAt ? `exited ${ago(live.exitedAt)} (code ${live.exitCode})` : 'not started')),
-            h('p', { class: 'muted small' }, 'Plays ', h('code', {}, 'player.js'), ' at ', h('code', {}, live.endpoint),
-                ' through the recorder, so every game is saved under Recordings. Restart after editing the strategy. It starts again automatically when the dashboard restarts, unless you stop it.'),
+            h('p', {}, live.running ? ['Playing ', h('a', { href: `#strategies/strategies/${live.runningStrategy}.js` }, h('code', {}, live.runningStrategy))] : ['Will play ', h('code', {}, live.strategy)],
+                live.running && live.runningStrategy !== live.strategy ? h('span', { class: 'badge warn', style: { marginLeft: '0.5rem' } }, `restart to switch to ${live.strategy}`) : null),
+            h('p', { class: 'muted small' }, 'Connects to ', h('code', {}, live.endpoint),
+                ' through the recorder, so every game is saved under Recordings. Restart after editing a strategy. It starts again automatically when the dashboard restarts, unless you stop it.'),
             live.hasToken ? null : h('p', { class: 'error' }, `No player token found. Save it (only the token) to ${live.tokenFile}.`),
             h('div', { class: 'buttons' },
                 h('button', { class: 'primary', disabled: live.running || !live.hasToken, onclick: () => act('start') }, 'Start'),
@@ -303,7 +317,7 @@ async function Live() {
                 h('button', { class: 'danger', disabled: !live.running, onclick: () => act('stop') }, 'Stop')));
     };
     set(view, h('h1', {}, 'Live bot'),
-        h('section', { class: 'card' }, status),
+        h('section', { class: 'card' }, status, choose),
         h('section', { class: 'card' }, h('h2', {}, 'Log'), log));
     await refresh();
     log.scrollTop = log.scrollHeight;
@@ -360,7 +374,7 @@ async function Strategies(file) {
     }
     const strategies = await api('strategies');
     set(view, h('h1', {}, 'Strategies'),
-        h('p', { class: 'muted' }, h('code', {}, 'player.js'), ' is what the live bot plays. Files in ', h('code', {}, 'strategies/'), ' are opponents and experiments. Edit them in the repo; this page is read-only.'),
+        h('p', { class: 'muted' }, 'One strategy per file in ', h('code', {}, 'strategies/'), '. The one marked live is what the live bot plays; change it on the ', h('a', { href: '#live' }, 'Live bot'), ' page. Edit code in the repo; this page is read-only.'),
         h('div', { class: 'grid two' }, strategies.map(entry => h('section', { class: 'card' },
             h('h2', {}, h('a', { href: `#strategies/${entry.file}` }, h('code', {}, entry.file)), entry.live ? h('span', { class: 'badge live', style: { marginLeft: '0.5rem' } }, 'live') : null),
             h('p', { class: 'muted small' }, entry.summary || 'No description.'),
@@ -369,7 +383,7 @@ async function Strategies(file) {
 }
 
 function quickRun(file) {
-    const opponent = file === 'strategies/random.js' ? 'player.js' : 'strategies/random.js';
+    const opponent = file === 'strategies/random.js' ? 'strategies/walker.js' : 'strategies/random.js';
     return h('button', { onclick: async () => {
         const run = await api('runs', { method: 'POST', body: { strategies: [file, opponent], preset: 'arena', games: 10 } });
         location.hash = `#gym/${run.id}`;
