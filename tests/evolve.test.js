@@ -54,6 +54,27 @@ test('broken live code is skipped and the last good version keeps playing', asyn
     } finally { sandbox.stop(); }
 });
 
+test('a game already under way switches to changed live code at a later turn', async () => {
+    const entry = liveStrategy(`return [Player.commands.move(state.ownUnits[0].handle, 'up')];`);
+    const sandbox = new Sandbox({ entry, checkEveryMs: 0 });
+    const state = { ownUnits: [{ handle: '0' }] };
+    try {
+        const game = sandbox.open();
+        game.round(8, 8, { name: 'dot', width: 1, height: 1, cells: [[0, 0]] });
+        assert.equal((await game.turn(state, 2000))[0].params[0], 'up');
+        fs.writeFileSync(entry, `const Player = require(${PLAYER});
+module.exports = class extends Player { async turn(state) { return [Player.commands.move(state.ownUnits[0].handle, this.width === 8 ? 'down' : 'left')]; } };`);
+        const later = new Date(Date.now() + 5000);
+        fs.utimesSync(entry, later, later);
+        let direction;
+        for (let turn = 0; turn < 40 && direction !== 'down'; turn++) {
+            direction = (await game.turn(state, 2000))[0]?.params[0];
+            await new Promise(done => setTimeout(done, 50));
+        }
+        assert.equal(direction, 'down');   // new code, with the round's context replayed
+    } finally { sandbox.stop(); }
+});
+
 test('speech: suggestions need the trigger, and live commands cannot talk', () => {
     assert.deepEqual(speech.suggestions([{ text: 'hello' }, { text: ' Evolve:  build\u0007 faster ' }, { text: speech.ADVERT }]), ['build faster']);
     const own = [{ handle: '0' }, { handle: '1' }];

@@ -29,7 +29,7 @@ for the maintainer.
 | Path | Who changes it | What it is |
 | --- | --- | --- |
 | `index.js` | you, by pull request | The `Player` the kit loads (`STRATEGY=evolve`). Wires the parts below together. |
-| `core/sandbox.js`, `core/runner.js` | you | Run live/ in a child process, one instance per game, reloading changed code for new games. |
+| `core/sandbox.js`, `core/runner.js` | you | Run live/ in a child process, one instance per game, switching running games to changed code at their next turn. |
 | `core/speech.js` | you | The advert, suggestion filter and command filter. |
 | `core/relay.js`, `core/charter.md` | you | Sends suggestions to the thread, wrapped in the charter (its standing rules). |
 | `core/check.js` | you | The only command the thread may run: sandbox load, tests, smoke games, commit live/. |
@@ -47,7 +47,9 @@ differences from running it directly:
 
 - Its `say` commands are dropped (only moves and blushes for our own units pass),
   and each turn one unit (a random idle one if any) says the advert instead of acting.
-- It runs sandboxed (below), and a new version takes effect at the next game.
+- It runs sandboxed (below). A new version takes effect about a second after it's saved: each
+  game gets a fresh instance at its next turn, with the current round's context replayed,
+  just like after a reconnect. Only in-memory state starts over.
 
 ## Relay
 

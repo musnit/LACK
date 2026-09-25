@@ -6,10 +6,12 @@
 //   - gets an empty environment and no command-line secrets;
 //   - can't stall the bot: each turn has a deadline, and a child that misses
 //     STALL_LIMIT deadlines in a row is killed.
-// Hot reload: each new game checks live/ for changes. Changed code starts in a
-// fresh child and takes over new games once it has loaded; games already under
-// way finish on the old child. Code that fails to load is logged and skipped
-// until live/ changes again.
+// Hot reload: live/ is checked for changes about once a second. Changed code
+// starts in a fresh child, and once it has loaded every game switches to it at
+// its next turn: the new code gets a fresh instance with the current round's
+// context, just like after a reconnect, so only in-memory strategy state starts
+// over. A crashed child is replaced the same way. Code that fails to load is
+// logged and skipped until live/ changes again.
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
@@ -39,13 +41,15 @@ function versionOf(dir) {
 
 class Sandbox {
     #entry; #readable; #log;
-    #current = null;     // the child new games go to
+    #current = null;     // the child games play on
     #candidate = null;   // newer code, still loading
     #failedVersion = null;
     #nextGame = 1;
+    #checkEveryMs; #checkedAt = 0;
 
-    constructor({ entry, readable = [path.join(REPO, 'game'), path.join(REPO, 'strategies')], log = () => {} }) {
+    constructor({ entry, readable = [path.join(REPO, 'game'), path.join(REPO, 'strategies')], log = () => {}, checkEveryMs = 1000 }) {
         this.#entry = entry;
+        this.#checkEveryMs = checkEveryMs;
         this.#readable = [...new Set([...readable, path.dirname(entry), __dirname])];
         this.#log = log;
     }
@@ -53,21 +57,44 @@ class Sandbox {
     // Per-game handle with the Player methods, backed by the newest working child.
     open() {
         this.#refresh();
-        const box = this.#current && !this.#current.dead ? this.#current : this.#candidate;
-        if (!box) return INERT;
-        const game = this.#nextGame++;
-        box.games.add(game);
-        this.#post(box, { type: 'create', game });
+        const seat = { box: null, game: 0, round: null };
+        if (!this.#seat(seat)) return INERT;
         return {
-            round: (width, height, targetShape) => this.#post(box, { type: 'round', game, width, height, targetShape }),
-            turn: (state, remainingMs) => this.#turn(box, game, state, remainingMs),
-            roundEnd: outcomes => this.#post(box, { type: 'roundEnd', game, outcomes }),
+            round: (width, height, targetShape) => {
+                seat.round = { width, height, targetShape };
+                this.#post(seat.box, { type: 'round', game: seat.game, ...seat.round });
+            },
+            turn: (state, remainingMs) => {
+                if (Date.now() - this.#checkedAt >= this.#checkEveryMs) this.#refresh();
+                const current = this.#current;
+                if (current && !current.dead && current !== seat.box) this.#seat(seat);
+                return this.#turn(seat.box, seat.game, state, remainingMs);
+            },
+            roundEnd: outcomes => this.#post(seat.box, { type: 'roundEnd', game: seat.game, outcomes }),
             finish: result => {
-                this.#post(box, { type: 'finish', game, result });
-                box.games.delete(game);
-                this.#retireIfDone(box);
+                this.#post(seat.box, { type: 'finish', game: seat.game, result });
+                seat.box.games.delete(seat.game);
+                this.#retireIfDone(seat.box);
             }
         };
+    }
+
+    // Put a game on the newest working child, moving it off its old one (if any)
+    // and replaying the current round's context. Returns false if there's no child.
+    #seat(seat) {
+        const box = this.#current && !this.#current.dead ? this.#current : this.#candidate;
+        if (!box) return false;
+        if (seat.box) {
+            this.#post(seat.box, { type: 'release', game: seat.game });
+            seat.box.games.delete(seat.game);
+            this.#retireIfDone(seat.box);
+        }
+        seat.box = box;
+        seat.game = this.#nextGame++;
+        box.games.add(seat.game);
+        this.#post(box, { type: 'create', game: seat.game });
+        if (seat.round) this.#post(box, { type: 'round', game: seat.game, ...seat.round });
+        return true;
     }
 
     // Load the live code once and report { ok, error }. Used by check.js.
@@ -86,6 +113,7 @@ class Sandbox {
     }
 
     #refresh() {
+        this.#checkedAt = Date.now();
         const version = versionOf(path.dirname(this.#entry));
         const newest = this.#candidate ?? this.#current;
         if (newest && !newest.dead && newest.version === version) return;
