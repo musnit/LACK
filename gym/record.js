@@ -4,6 +4,7 @@
 //
 // Writes into gym/recordings/ (git-ignored):
 //   latest-config.json   the most recent game's real settings, usable with `gym/run.js --config`
+//   latest-arena.json / latest-clash.json   the same, per mode (when the server names the mode)
 //   configs.jsonl        one line per game joined: mode, units each, competitors, settings
 //   <gameId>.jsonl       every server event for that game plus the commands we sent, one JSON per line
 //
@@ -24,6 +25,7 @@ function saveConfig(message) {
     const summary = { gameId: game.gameId, mode: game.mode ?? null, receivedAt: new Date().toISOString(),
         count, competitors: game.config.requiredUnits / count, config: game.config };
     writeFileSync(join(folder, 'latest-config.json'), JSON.stringify(summary, null, 2) + '\n');
+    if (summary.mode) writeFileSync(join(folder, `latest-${summary.mode}.json`), JSON.stringify(summary, null, 2) + '\n');
     appendFileSync(join(folder, 'configs.jsonl'), JSON.stringify({ ...summary, config: { ...game.config, shapes: game.config.shapes.map(shape => shape.name) } }) + '\n');
 }
 
