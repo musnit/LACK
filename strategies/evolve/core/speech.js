@@ -1,13 +1,12 @@
 // Evolve's control of in-game speech. The live strategy never talks: anything
-// but a legal move or blush for one of our own units is dropped. Instead the
-// core says one advert per round, inviting players to suggest changes, and
-// picks suggestions out of what it hears. Speech is anonymous, so a suggestion
+// but a legal move or blush for one of our own units is dropped. Instead, every
+// turn the core has a random unit say an advert inviting players to suggest
+// changes, and picks suggestions out of what it hears. Speech is anonymous, so a suggestion
 // is simply any heard message that starts with TRIGGER.
 const Player = require('../../../game/Player');
 
 const TRIGGER = 'evolve:';
 const ADVERT = `I'm a self-evolving bot. Say "${TRIGGER} <idea>" and my AI maintainer may rewrite my strategy with it.`;
-const ADVERT_BY_TURN = 3;   // no idle unit by this turn of the round? borrow a busy one
 const HEX = /^#[0-9a-f]{6}$/i;
 
 // Suggestions in one turn's `messages`, with the trigger removed.
@@ -41,15 +40,16 @@ function legalCommands(commands, ownUnits) {
     return legal;
 }
 
-// `commands` plus the advert, said by an idle unit if there is one. Returns
-// null when nobody can advertise this turn.
-function advertise(commands, ownUnits, turnInRound) {
+// `commands` plus the advert, said by a random idle unit, or by a random busy
+// one (which then skips its move) when none is idle. No units: no advert.
+function advertise(commands, ownUnits) {
+    if (!ownUnits.length) return commands;
     const busy = new Set(commands.map(command => String(command.handle)));
-    const idle = ownUnits.find(unit => !busy.has(String(unit.handle)));
-    if (idle) return [...commands, Player.commands.say(idle.handle, ADVERT)];
-    if (turnInRound < ADVERT_BY_TURN || !commands.length) return null;
-    const [borrowed, ...rest] = commands;
-    return [...rest, Player.commands.say(borrowed.handle, ADVERT)];
+    const idle = ownUnits.filter(unit => !busy.has(String(unit.handle)));
+    const speaker = pick(idle.length ? idle : ownUnits);
+    return [...commands.filter(command => String(command.handle) !== String(speaker.handle)), Player.commands.say(speaker.handle, ADVERT)];
 }
+
+const pick = list => list[Math.floor(Math.random() * list.length)];
 
 module.exports = { TRIGGER, ADVERT, suggestions, clean, legalCommands, advertise };

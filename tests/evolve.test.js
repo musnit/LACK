@@ -63,5 +63,9 @@ test('speech: suggestions need the trigger, and live commands cannot talk', () =
         { handle: '1', commandName: 'move', params: ['up'] },
         { handle: '1', commandName: 'blush', params: ['#ffffff'] }
     ], own), [{ handle: '1', commandName: 'move', params: ['up'] }]);
-    assert.equal(speech.advertise([{ handle: '1', commandName: 'move', params: ['up'] }], own, 0).at(-1).params[0], speech.ADVERT);
+    const withIdle = speech.advertise([{ handle: '1', commandName: 'move', params: ['up'] }], own);
+    assert.deepEqual(withIdle.map(command => [command.handle, command.commandName]), [['1', 'move'], ['0', 'say']]);
+    const allBusy = speech.advertise(own.map(unit => ({ handle: unit.handle, commandName: 'move', params: ['up'] })), own);
+    assert.equal(allBusy.length, 2);
+    assert.equal(allBusy.filter(command => command.commandName === 'say' && command.params[0] === speech.ADVERT).length, 1);
 });
