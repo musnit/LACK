@@ -16,6 +16,12 @@
 //   - Every copy is checked with the real matcher, when planned and again every
 //     turn, and moved if a neighbour would make it match wrongly. Anchors that
 //     sit in another team's half-built copy scanned before ours are avoided.
+//   - Copies that can't be finished (an anchor walked off and nobody can take its
+//     place) are disbanded so their members plan again instead of waiting all round.
+//   - Late in the round, a copy is moved if parked foreign units next to it could
+//     break it with a last-turn step (the attack below, used against us).
+//   - A move the server keeps refusing (another unit claims the same cell every
+//     turn) is dropped for a few random turns, so two stubborn units can't deadlock.
 //   - Endgame attacks: in the last turns idle units wait next to cells that would
 //     complete a copy with other teams' units. On the final turn, when nobody can
 //     react, units that would score nothing step in ("snipe"), and a lone unit of
@@ -27,6 +33,7 @@ const TURNS_PER_ROUND = 64; // server default; the Player API doesn't tell us
 const STILL = 3;            // a foreign unit parked this many turns counts as an anchor
 const STAGE = 6;            // idle units start lining up last-turn snipes this many turns before the end
 const REACH = 16;           // how far we look for foreign units to build around
+const GUARD = 16;           // copies dodge last-turn attacks this many turns before the end
 const DIRS = Object.entries(Player.DELTAS);
 const EMPTY = 0, OWN = 1, FOREIGN = 2;
 
@@ -38,6 +45,8 @@ class Outpost extends Player {
         this.still = new Int16Array(width * height);
         this.grid = null;
         this.stuck = new Map();             // handle -> turns spent unable to move toward its job
+        this.sent = new Map();              // handle -> { from, to } of last turn's move command
+        this.refused = new Map();           // handle -> { to, count, until } for moves the server refused
     }
 
     async turn(state) {
@@ -51,9 +60,11 @@ class Outpost extends Player {
         Object.assign(this, { units, ownAt, turnsLeft });
         // Rough number of competitors, from the first board of the game (units only die later).
         this.teams ??= Math.max(2, Math.round(state.units.length / Math.max(1, state.ownUnits.length)));
+        this.#noteRefusals();
 
         this.#maintainSites();
         this.#fillOpenSlots(this.#free());
+        this.#dropUnfinishable();
         this.#planSites(this.#free());
         if (this.#free().length) this.#convert(this.#free().length);
         this.#planSites(this.#free());
@@ -62,8 +73,35 @@ class Outpost extends Player {
         if (this.#free().length && this.turnIndex % STILL === 1 && turnsLeft > 32) this.#replan();
         const idle = this.#free();
         const snipes = turnsLeft > 1 && turnsLeft <= STAGE ? this.#snipeSpots(idle) : new Map();
-        const commands = this.#move(idle, snipes);
-        return turnsLeft === 1 ? this.#finalTouch(commands) : commands;
+        let commands = this.#move(idle, snipes);
+        if (turnsLeft === 1) commands = this.#finalTouch(commands);
+        this.sent = new Map(commands.map(c => {
+            const at = units.get(c.handle), [dx, dy] = Player.DELTAS[c.params[0]];
+            return [c.handle, { from: at, to: at + dy * W + dx }];
+        }));
+        return commands;
+    }
+
+    // A unit still where it was after we moved it was blocked: usually by another unit
+    // claiming the same cell. After two refusals in a row, avoid that cell for 1-3 random
+    // turns; if the other unit is just as stubborn, one of us gives way.
+    #noteRefusals() {
+        for (const [h, { from, to }] of this.sent) {
+            if (this.units.get(h) !== from) { this.refused.delete(h); continue; }
+            const count = this.refused.get(h)?.to === to ? this.refused.get(h).count + 1 : 1;
+            this.refused.set(h, { to, count, until: count >= 2 ? this.turnIndex + Math.floor(Math.random() * 3) : 0 });
+        }
+    }
+
+    #avoids(h, cell) {
+        const r = this.refused.get(h);
+        return r !== undefined && r.to === cell && this.turnIndex <= r.until;
+    }
+
+    // A copy with a cell nobody can fill (typically an anchor that walked off) would
+    // strand its members all round: disband it so they can plan something else.
+    #dropUnfinishable() {
+        this.sites = this.sites.filter(site => site.cells.every(c => site.members.has(c) || site.anchors.has(c)));
     }
 
     // ---------- endgame attacks ----------
@@ -169,7 +207,7 @@ class Outpost extends Player {
             // or failing that, accept the visitor as part of the copy and free our unit.
             // Likewise move the copy if its neighbours changed so the matcher wouldn't give it to us.
             const parked = site.cells.filter(c => !site.anchors.has(c) && this.anchor(c));
-            if (parked.length || (this.turnsLeft > 2 && !this.#holds(site))) {
+            if (parked.length || (this.turnsLeft > 2 && (!this.#holds(site) || this.#threatened(site)))) {
                 const moved = this.#relocate(site);
                 if (moved) site = moved;
                 else for (const c of parked) { site.anchors.add(c); site.members.delete(c); }
@@ -188,7 +226,7 @@ class Outpost extends Player {
         let best = null;
         for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
             const option = this.#evaluate(ox + dx, oy + dy, members, others);
-            if (option && option.anchors.size === 0 && (!best || option.cost < best.cost)) best = option;
+            if (option && option.anchors.size === 0 && (!best || option.cost < best.cost) && !this.#threatened(option.site)) best = option;
         }
         if (best) this.sites[this.sites.indexOf(site)] = best.site;
         return best?.site ?? null;
@@ -342,14 +380,62 @@ class Outpost extends Player {
     }
 
     // Would the real matcher match every cell of this copy once its members arrive?
-    #holds(site) {
+    #holds(site, trial = this.#completed(site)) {
         const { width: W, height: H } = this, shape = this.targetShape;
-        const trial = this.grid.slice();
-        for (const [, h] of site.members) trial[this.units.get(h)] = EMPTY;
-        for (const c of site.cells) trial[c] = OWN;
         const [x, y] = xy(Math.min(...site.cells), W);
         const matched = new Set(matches(trial, W, H, shape, x - 2 * shape.width, y - shape.height, x + 2 * shape.width, y + shape.height).flat());
         return site.cells.every(c => matched.has(c));
+    }
+
+    #completed(site) {
+        const trial = this.grid.slice();
+        for (const [, h] of site.members) trial[this.units.get(h)] = EMPTY;
+        for (const c of site.cells) trial[c] = OWN;
+        return trial;
+    }
+
+    // Late in the round: could parked foreign units near this copy break it by each
+    // walking into an empty cell at most two steps away (one unit, or two together)?
+    // Snipers wait a couple of cells off and strike on the last turns. Units already
+    // matched in a copy of their own are assumed to stay put.
+    #threatened(site) {
+        if (this.turnsLeft > GUARD) return false;
+        const { width: W, height: H } = this, shape = this.targetShape, trial = this.#completed(site);
+        if (this.settledAt !== this.turnIndex) {
+            this.settledAt = this.turnIndex;
+            this.settled = new Set(matches(this.grid, W, H, shape, 0, 0, W, H).flat());
+        }
+        const near = new Set();
+        for (const c of site.cells) {
+            const [x, y] = xy(c, W);
+            for (let ny = y - shape.height + 1; ny < y + shape.height; ny++) for (let nx = x - shape.width + 1; nx < x + shape.width; nx++) {
+                if (nx >= 0 && ny >= 0 && nx < W && ny < H) near.add(ny * W + nx);
+            }
+        }
+        const steps = [];              // [cell, the parked units that could step into it]
+        for (const c of near) {
+            if (trial[c] !== EMPTY) continue;
+            const [x, y] = xy(c, W), from = [];
+            for (let ny = y - 2; ny <= y + 2; ny++) for (let nx = x - 2; nx <= x + 2; nx++) {
+                const n = ny * W + nx;
+                if (nx >= 0 && ny >= 0 && nx < W && ny < H && dist(n, c, W) <= 2 && this.anchor(n) && !site.anchors.has(n) && !this.settled.has(n)) from.push(n);
+            }
+            if (from.length) steps.push([c, from]);
+        }
+        const oneUnit = (a, b) => a.length === 1 && b.length === 1 && a[0] === b[0];
+        const breaks = (...cells) => {
+            for (const c of cells) trial[c] = FOREIGN;
+            const broken = !this.#holds(site, trial);
+            for (const c of cells) trial[c] = EMPTY;
+            return broken;
+        };
+        for (let a = 0; a < steps.length; a++) {
+            if (breaks(steps[a][0])) return true;
+            for (let b = a + 1; b < steps.length; b++) {
+                if (!oneUnit(steps[a][1], steps[b][1]) && breaks(steps[a][0], steps[b][0])) return true;
+            }
+        }
+        return false;
     }
 
     // Is this anchor probably part of another team's copy in progress, one the matcher
@@ -433,7 +519,7 @@ class Outpost extends Player {
                 const steps = neighbours(at, W, H).filter(i => f[i] < f[at]).sort((a, b) => f[a] - f[b]);
                 let decided = false;
                 for (const i of steps) {
-                    if (claimed.has(i) || grid[i] === FOREIGN) continue;
+                    if (claimed.has(i) || grid[i] === FOREIGN || this.#avoids(h, i)) continue;
                     if (grid[i] === OWN) {
                         const other = this.ownAt.get(i);
                         if (next.has(other) && next.get(other) !== at) { claim(h, i); decided = true; break; }
