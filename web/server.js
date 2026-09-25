@@ -4,6 +4,8 @@
 //   node web/server.js
 //
 // The live bot reads its token from ~/.config/lack/token (never from this repo).
+// The self-updating evolve strategy plays from its own worktree (~/LACK-evolve,
+// or LACK_EVOLVE_DIR), where its maintainer thread edits it; see strategies/evolve/README.md.
 const http = require('node:http');
 const { fork, spawn } = require('node:child_process');
 const fs = require('node:fs');
@@ -23,6 +25,11 @@ const TOKEN_FILE = path.join(SETTINGS_DIR, 'token');
 const LIVE_FILE = path.join(SETTINGS_DIR, 'live.json');
 const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 8080);
+const EVOLVE_DIR = path.resolve(process.env.LACK_EVOLVE_DIR || path.join(os.homedir(), 'LACK-evolve'));
+const hasEvolveDir = () => EVOLVE_DIR !== ROOT && fs.existsSync(path.join(EVOLVE_DIR, 'strategies', 'evolve', 'index.js'));
+// The checkout the live bot runs from for a given strategy.
+const liveRoot = strategy => strategy === 'evolve' && hasEvolveDir() ? EVOLVE_DIR : ROOT;
+const recordingDirs = () => [...new Set([RECORDINGS, path.join(liveRoot('evolve'), 'gym', 'recordings')])];
 fs.mkdirSync(RUNS, { recursive: true });
 
 // ---------- helpers ----------
@@ -38,15 +45,19 @@ const readBody = req => new Promise((resolve, reject) => {
 const readJson = (file, fallback) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; } };
 
 // ---------- strategies ----------
-// Every strategies/*.js file that defines a Player subclass (lib.js only holds helpers).
+// Every strategies/*.js file that defines a Player subclass (lib.js only holds helpers),
+// plus folder strategies whose index.js does (strategies/evolve/).
 function listStrategies() {
     const live = liveSettings().strategy;
-    return fs.readdirSync(path.join(ROOT, 'strategies')).filter(file => file.endsWith('.js')).sort().flatMap(file => {
-        const source = fs.readFileSync(path.join(ROOT, 'strategies', file), 'utf8');
+    const strategies = path.join(ROOT, 'strategies');
+    const files = fs.readdirSync(strategies).sort().flatMap(entry =>
+        entry.endsWith('.js') ? [entry] : fs.existsSync(path.join(strategies, entry, 'index.js')) ? [`${entry}/index.js`] : []);
+    return files.flatMap(file => {
+        const source = fs.readFileSync(path.join(strategies, file), 'utf8');
         if (!/extends\s+Player\b/.test(source)) return [];
-        const name = file.replace(/\.js$/, '');
+        const name = file.replace(/(\/index)?\.js$/, '');
         const summary = source.split('\n').filter(line => line.startsWith('//')).slice(0, 3).map(line => line.replace(/^\/\/\s?/, '')).join(' ');
-        return [{ file: `strategies/${file}`, name, lines: source.split('\n').length, summary, live: name === live }];
+        return [{ file: `strategies/${file}`, name, lines: source.split('\n').length, summary, live: name === live, root: liveRoot(name) }];
     });
 }
 const isStrategy = file => listStrategies().some(entry => entry.file === file);
@@ -54,9 +65,12 @@ const isStrategy = file => listStrategies().some(entry => entry.file === file);
 // ---------- presets (built-in plus configs recorded from the live server) ----------
 function presets() {
     const list = Object.entries(PRESETS).map(([id, config]) => ({ id, label: `${id} (README defaults)`, config }));
-    const latest = readJson(path.join(RECORDINGS, 'latest-config.json'), null);
+    // The newest copy across recording folders (the live bot may run from evolve's worktree).
+    const newest = name => recordingDirs().map(dir => path.join(dir, name)).filter(file => fs.existsSync(file))
+        .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+    const latest = readJson(newest('latest-config.json'), null);
     for (const mode of ['arena', 'clash']) {
-        const recorded = readJson(path.join(RECORDINGS, `latest-${mode}.json`), latest?.mode === mode ? latest : null);
+        const recorded = readJson(newest(`latest-${mode}.json`), latest?.mode === mode ? latest : null);
         if (recorded) list.push({ id: `live-${mode}`, label: `${mode} (recorded live ${recorded.receivedAt?.slice(0, 10)})`,
             config: { ...PRESETS[mode], ...recorded.config, unitsPerPlayer: recorded.count } });
     }
@@ -150,13 +164,15 @@ function startLive() {
     try { token = fs.readFileSync(TOKEN_FILE, 'utf8').trim(); } catch {}
     if (!token) throw new Error(`No token. Save your player token to ${TOKEN_FILE}.`);
     const { endpoint, strategy } = liveSettings();
-    const child = spawn(process.execPath, [path.join(ROOT, 'gym', 'record.js'), token, endpoint],
-        { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, STRATEGY: strategy } });
+    const root = liveRoot(strategy);
+    const child = spawn(process.execPath, [path.join(root, 'gym', 'record.js'), token, endpoint],
+        { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, STRATEGY: strategy } });
     live.strategy = strategy;
+    live.root = root;
     live.child = child;
     live.startedAt = Date.now();
     live.exitCode = null;
-    logLive(`--- started live bot (pid ${child.pid}) playing strategies/${strategy}.js ---`);
+    logLive(`--- started live bot (pid ${child.pid}) playing ${strategy} from ${root} ---`);
     child.stdout.on('data', logLive);
     child.stderr.on('data', logLive);
     child.on('exit', code => {
@@ -177,15 +193,28 @@ const liveStatus = () => ({
     running: !!live.child, pid: live.child?.pid ?? null, startedAt: live.startedAt, exitedAt: live.exitedAt,
     exitCode: live.exitCode, hasToken: fs.existsSync(TOKEN_FILE), tokenFile: TOKEN_FILE,
     endpoint: liveSettings().endpoint, strategy: liveSettings().strategy, runningStrategy: live.child ? live.strategy : null,
-    log: live.log.slice(-200)
+    root: live.child ? live.root : liveRoot(liveSettings().strategy), log: live.log.slice(-200)
 });
+
+// Evolve's relay state, read from its worktree: maintainer thread and recent events
+// (games, suggestions heard and relayed, reload errors) from strategies/evolve/data/.
+function evolveStatus() {
+    const data = path.join(liveRoot('evolve'), 'strategies', 'evolve', 'data');
+    let lines = [];
+    try { lines = fs.readFileSync(path.join(data, 'log.jsonl'), 'utf8').trim().split('\n').slice(-200); } catch {}
+    const events = lines.flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
+    const games = events.filter(event => event.type === 'game');
+    return { dir: liveRoot('evolve'), separate: hasEvolveDir(), thread: readJson(path.join(data, 'config.json'), {}).thread ?? null,
+        games: games.length, wins: games.filter(game => game.winner).length,
+        events: events.filter(event => event.type !== 'game').slice(-30).reverse() };
+}
 
 // ---------- recordings ----------
 const recordingCache = new Map();
-function recordingInfo(file) {
-    const full = path.join(RECORDINGS, file);
+function recordingInfo(full) {
+    const file = path.basename(full);
     const stat = fs.statSync(full);
-    const cached = recordingCache.get(file);
+    const cached = recordingCache.get(full);
     if (cached && cached.mtimeMs === stat.mtimeMs) return cached.info;
     let mode = null, finished = null, rounds = 0, firstAt = null, units = null;
     for (const line of fs.readFileSync(full, 'utf8').split('\n')) {
@@ -201,12 +230,13 @@ function recordingInfo(file) {
     }
     const info = { id: file.replace(/\.jsonl$/, ''), mode, rounds, units, startedAt: firstAt, updatedAt: stat.mtimeMs,
         finished, inProgress: !finished && Date.now() - stat.mtimeMs < 120000, size: stat.size };
-    recordingCache.set(file, { mtimeMs: stat.mtimeMs, info });
+    recordingCache.set(full, { mtimeMs: stat.mtimeMs, info });
     return info;
 }
-const listRecordings = () => fs.existsSync(RECORDINGS)
-    ? fs.readdirSync(RECORDINGS).filter(file => file.endsWith('.jsonl') && file !== 'configs.jsonl').map(recordingInfo).sort((a, b) => b.updatedAt - a.updatedAt)
-    : [];
+// Recordings from this checkout and from evolve's worktree.
+const recordingFiles = () => recordingDirs().filter(dir => fs.existsSync(dir)).flatMap(dir =>
+    fs.readdirSync(dir).filter(file => file.endsWith('.jsonl') && file !== 'configs.jsonl').map(file => path.join(dir, file)));
+const listRecordings = () => recordingFiles().map(recordingInfo).sort((a, b) => b.updatedAt - a.updatedAt);
 
 // ---------- routing ----------
 const routes = [
@@ -238,6 +268,7 @@ const routes = [
         return fs.existsSync(file) ? [200, fs.readFileSync(file, 'utf8')] : [404, { error: 'No replay' }];
     }],
     ['GET', /^\/api\/live$/, () => liveStatus()],
+    ['GET', /^\/api\/evolve$/, () => evolveStatus()],
     ['POST', /^\/api\/live\/start$/, () => { startLive(); return liveStatus(); }],
     ['POST', /^\/api\/live\/stop$/, async () => { await stopLive(); return liveStatus(); }],
     ['POST', /^\/api\/live\/strategy$/, async req => {
@@ -250,8 +281,8 @@ const routes = [
     ['POST', /^\/api\/live\/restart$/, async () => { await stopLive(); startLive(); return liveStatus(); }],
     ['GET', /^\/api\/recordings$/, () => listRecordings()],
     ['GET', /^\/api\/recordings\/([\w-]+)$/, (req, url, [, id]) => {
-        const file = path.join(RECORDINGS, `${id}.jsonl`);
-        return fs.existsSync(file) ? replayFromRecording(file) : [404, { error: 'Not found' }];
+        const file = recordingFiles().find(full => path.basename(full) === `${id}.jsonl`);
+        return file ? replayFromRecording(file) : [404, { error: 'Not found' }];
     }],
     ['GET', /^\/api\/shapes$/, () => Game.SHAPES]
 ];

@@ -281,6 +281,7 @@ async function GymRun(id) {
 async function Live() {
     const log = h('pre', { class: 'log mono', tabindex: 0, 'aria-label': 'Live bot log' });
     const status = h('div');
+    const evolveCard = h('section', { class: 'card', hidden: true });
     const strategies = await api('strategies');
     // Built once so the 3-second refresh doesn't reset it while you're choosing.
     const picker = h('select', { id: 'live-strategy' }, strategies.map(entry => h('option', { value: entry.name }, entry.name)));
@@ -306,22 +307,41 @@ async function Live() {
             h('p', {}, live.running ? h('span', { class: 'badge live' }, 'running') : h('span', { class: 'badge warn' }, 'stopped'), ' ',
                 h('span', { class: 'muted' }, live.running ? `pid ${live.pid}, up ${duration(Date.now() - live.startedAt)}` :
                     live.exitedAt ? `exited ${ago(live.exitedAt)} (code ${live.exitCode})` : 'not started')),
-            h('p', {}, live.running ? ['Playing ', h('a', { href: `#strategies/strategies/${live.runningStrategy}.js` }, h('code', {}, live.runningStrategy))] : ['Will play ', h('code', {}, live.strategy)],
+            h('p', {}, live.running ? ['Playing ', h('a', { href: `#strategies/${strategies.find(entry => entry.name === live.runningStrategy)?.file ?? ''}` }, h('code', {}, live.runningStrategy))] : ['Will play ', h('code', {}, live.strategy)],
                 live.running && live.runningStrategy !== live.strategy ? h('span', { class: 'badge warn', style: { marginLeft: '0.5rem' } }, `restart to switch to ${live.strategy}`) : null),
-            h('p', { class: 'muted small' }, 'Connects to ', h('code', {}, live.endpoint),
+            h('p', { class: 'muted small' }, 'Runs from ', h('code', {}, live.root), '. Connects to ', h('code', {}, live.endpoint),
                 ' through the recorder, so every game is saved under Recordings. Restart after editing a strategy. It starts again automatically when the dashboard restarts, unless you stop it.'),
             live.hasToken ? null : h('p', { class: 'error' }, `No player token found. Save it (only the token) to ${live.tokenFile}.`),
             h('div', { class: 'buttons' },
                 h('button', { class: 'primary', disabled: live.running || !live.hasToken, onclick: () => act('start') }, 'Start'),
                 h('button', { disabled: !live.hasToken, onclick: () => act('restart') }, 'Restart'),
                 h('button', { class: 'danger', disabled: !live.running, onclick: () => act('stop') }, 'Stop')));
+        evolveCard.hidden = live.strategy !== 'evolve';
+        if (!evolveCard.hidden) set(evolveCard, ...evolveSection(await api('evolve')));
     };
     set(view, h('h1', {}, 'Live bot'),
         h('section', { class: 'card' }, status, choose),
+        evolveCard,
         h('section', { class: 'card' }, h('h2', {}, 'Log'), log));
     await refresh();
     log.scrollTop = log.scrollHeight;
     poll(refresh, 3000);
+}
+
+// Evolve's relay: its maintainer thread and what it heard and relayed (strategies/evolve/README.md).
+function evolveSection(evolve) {
+    const label = { heard: 'heard', relayed: 'relayed to thread', 'relay-refused': 'thread busy, will retry', sandbox: 'sandbox' };
+    return [
+        h('h2', {}, 'Evolve'),
+        evolve.separate ? null : h('p', { class: 'error' }, `No evolve worktree at ${evolve.dir}; run strategies/evolve/core/setup.js.`),
+        h('p', {}, 'Maintainer thread ', evolve.thread ? h('code', {}, evolve.thread) : h('span', { class: 'muted' }, 'not configured'),
+            h('span', { class: 'muted' }, ` · won ${evolve.wins} of ${evolve.games} logged live games`)),
+        h('p', { class: 'muted small' }, 'Players suggest changes by saying "evolve: <idea>"; the newest suggestion goes to the thread every 15 s.'),
+        evolve.events.length
+            ? table(['When', 'What', 'Text'], evolve.events.map(event => ({ cells: [ago(Date.parse(event.at)), label[event.type] ?? event.type,
+                h('span', { class: 'mono small' }, [event.text ?? event.message, event.reason && `(${event.reason})`].filter(Boolean).join(' '))] })))
+            : h('p', { class: 'empty' }, 'No suggestions heard yet.')
+    ];
 }
 
 // ---------- Recordings ----------
@@ -374,7 +394,7 @@ async function Strategies(file) {
     }
     const strategies = await api('strategies');
     set(view, h('h1', {}, 'Strategies'),
-        h('p', { class: 'muted' }, 'One strategy per file in ', h('code', {}, 'strategies/'), '. The one marked live is what the live bot plays; change it on the ', h('a', { href: '#live' }, 'Live bot'), ' page. Edit code in the repo; this page is read-only.'),
+        h('p', { class: 'muted' }, 'One strategy per file (or folder) in ', h('code', {}, 'strategies/'), '. The one marked live is what the live bot plays; change it on the ', h('a', { href: '#live' }, 'Live bot'), ' page. Edit code in the repo; this page is read-only.'),
         h('div', { class: 'grid two' }, strategies.map(entry => h('section', { class: 'card' },
             h('h2', {}, h('a', { href: `#strategies/${entry.file}` }, h('code', {}, entry.file)), entry.live ? h('span', { class: 'badge live', style: { marginLeft: '0.5rem' } }, 'live') : null),
             h('p', { class: 'muted small' }, entry.summary || 'No description.'),
