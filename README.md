@@ -115,8 +115,3 @@ is authoritative. The client receives it at startup/resume.
 - [Building a gym](docs/gym.md): engine API and host responsibilities.
 - Run the offline checks: `node --test tests/*.test.js`.
 
-This folder is independent: copy it alone to another repository. It has no
-runtime imports from the original project. Engine copies and client originate
-from LatticeAnimals (2026-09-25). `game/` is an unmodified rules snapshot;
-`client.js` uses root-level paths, a public endpoint default, and token-only CLI
-arguments. Live server rules remain authoritative.
